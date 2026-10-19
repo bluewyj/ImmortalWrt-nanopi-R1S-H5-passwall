@@ -1,0 +1,132 @@
+name: R1S-H5 ImageBuilder iStore
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    name: ${{ matrix.luci }}-${{ matrix.size_label }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - luci: "24.10.6"
+            size: 1024
+            size_label: 1G
+            series: "24"
+          - luci: "24.10.6"
+            size: 4096
+            size_label: 4G
+            series: "24"
+          - luci: "25.12.1"
+            size: 1024
+            size_label: 1G
+            series: "25"
+          - luci: "25.12.1"
+            size: 4096
+            size_label: 4G
+            series: "25"
+          - luci: "25.12.2"
+            size: 1024
+            size_label: 1G
+            series: "25"
+          - luci: "25.12.2"
+            size: 4096
+            size_label: 4G
+            series: "25"
+
+    env:
+      PROFILE: friendlyarm_nanopi-r1s-h5
+      INCLUDE_DOCKER: "no"
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: Clone wukongdaily ImageBuilder
+        run: |
+          git clone --depth 1 https://github.com/wukongdaily/ImmortalWrt-ImageBuilder.git builder
+          chmod +x builder/sunxi-cortexa53/build24.sh builder/sunxi-cortexa53/build25.sh
+          chmod +x builder/shell/*.sh || true
+
+      - name: Enable iStore
+        working-directory: builder
+        run: |
+          if [ "${{ matrix.series }}" = "24" ]; then
+            echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-store"' >> shell/custom-packages.sh
+          else
+            echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-store"' >> shell/apk-custom-packages.sh
+          fi
+          echo "iStore enabled for ${{ matrix.luci }}"
+
+      - name: Build firmware
+        working-directory: builder
+        run: |
+          mkdir -p bin files/etc/uci-defaults
+          BUILD_SCRIPT="sunxi-cortexa53/build24.sh"
+          EXTRA_MOUNT=()
+          if [ "${{ matrix.series }}" = "25" ]; then
+            BUILD_SCRIPT="sunxi-cortexa53/build25.sh"
+          else
+            EXTRA_MOUNT+=(-v "${PWD}/arch/arch.conf:/home/build/immortalwrt/files/etc/opkg/arch.conf")
+          fi
+
+          docker run --rm -i \
+            --user root \
+            -v "${PWD}/bin:/home/build/immortalwrt/bin" \
+            -v "${PWD}/files/etc/uci-defaults:/home/build/immortalwrt/files/etc/uci-defaults" \
+            "${EXTRA_MOUNT[@]}" \
+            -v "${PWD}/shell:/home/build/immortalwrt/shell" \
+            -v "${PWD}/${BUILD_SCRIPT}:/home/build/immortalwrt/build.sh" \
+            -e PROFILE="${PROFILE}" \
+            -e INCLUDE_DOCKER="${INCLUDE_DOCKER}" \
+            -e ROOTSIZE="${{ matrix.size }}" \
+            -e ROOTFS_PARTSIZE="${{ matrix.size }}" \
+            "immortalwrt/imagebuilder:sunxi-cortexa53-openwrt-${{ matrix.luci }}" \
+            /bin/bash /home/build/immortalwrt/build.sh
+
+      - name: Collect firmware
+        id: collect
+        working-directory: builder
+        run: |
+          mkdir -p dist
+          mapfile -t IMGS < <(find bin/targets/sunxi/cortexa53 -name '*squashfs-sdcard.img.gz' -print)
+          if [ "${#IMGS[@]}" -eq 0 ]; then
+            echo "No squashfs-sdcard image found"
+            ls -laR bin/targets || true
+            exit 1
+          fi
+          SRC="${IMGS[0]}"
+          NAME="immortalwrt-${{ matrix.luci }}-sunxi-cortexa53-friendlyarm_nanopi-r1s-h5-${{ matrix.size_label }}-istore-squashfs-sdcard.img.gz"
+          cp "$SRC" "dist/${NAME}"
+          sha256sum "dist/${NAME}" | tee "dist/${NAME}.sha256"
+          echo "asset=${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: r1s-h5-${{ matrix.luci }}-${{ matrix.size_label }}-istore
+          path: builder/dist/*
+          if-no-files-found: error
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: r1s-h5-${{ matrix.luci }}-${{ matrix.size_label }}-istore
+          name: R1S-H5 ImmortalWrt ${{ matrix.luci }} ${{ matrix.size_label }} iStore
+          body: |
+            NanoPi R1S-H5 ImageBuilder firmware (wukongdaily workflow)
+
+            - ImmortalWrt: `${{ matrix.luci }}`
+            - Profile: `friendlyarm_nanopi-r1s-h5`
+            - Rootfs: `${{ matrix.size_label }}`
+            - iStore: yes
+            - Docker: no
+          files: builder/dist/*
+          draft: false
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
